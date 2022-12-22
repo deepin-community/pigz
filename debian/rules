@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+-include /usr/share/quilt/quilt.make
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	dh_auto_build -- LDFLAGS="-lz $(LDFLAGS)" CFLAGS="$(CFLAGS)" CPPFLAGS="$(CPPFLAGS)"
+
+override_dh_install:
+	dh_testdir
+	dh_testroot
+	dh_prep  
+	dh_installdirs
+	cp -l pigz $(CURDIR)/debian/pigz/usr/bin
+	cp -l pigz $(CURDIR)/debian/pigz/usr/bin/unpigz
+	dh_installman pigz.1
+	ln -sf pigz.1.gz debian/pigz/usr/share/man/man1/unpigz.1.gz
