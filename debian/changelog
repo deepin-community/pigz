@@ -1,3 +1,9 @@
+pigz (2.8-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Eduard Bloch <blade@debian.org>  Tue, 22 Aug 2023 21:47:50 +0200
+
 pigz (2.6-1) unstable; urgency=medium
 
   * New upstream release

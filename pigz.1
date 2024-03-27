@@ -1,4 +1,4 @@
-.TH PIGZ 1 "February 6, 2021"
+.TH PIGZ 1 "August 19, 2023"
 .SH NAME
 pigz, unpigz \- compress or expand files
 .SH SYNOPSIS
@@ -97,7 +97,9 @@ or
 .PP
 All options on the command line are processed before any names are processed.
 If no names are provided on the command line, or if "-" is given as a name (but
-not after "--"), then the input is taken from stdin.
+not after "--"), then the input is taken from stdin. If the GZIP or PIGZ
+environment variables are set, then options are taken from their values before
+any command line options are processed, first from GZIP, then from PIGZ.
 .PP
 Compressed files can be restored to their original form using
 .I pigz -d
@@ -176,7 +178,7 @@ important.
 .B -M --time
 Store or restore the modification time. -nM will store or restore the
 modification time, but not the name. Note that the order of the options is
-important.
+important. Modification times are stored only for regular files, not pipes.
 .TP
 .B -n --no-name
 Do not store or restore the file name or the modification time. This is the
@@ -240,4 +242,4 @@ This software is provided 'as-is', without any express or implied
 warranty.  In no event will the author be held liable for any damages
 arising from the use of this software.
 .PP
-Copyright (C) 2007-2021 Mark Adler <madler@alumni.caltech.edu>
+Copyright (C) 2007-2023 Mark Adler <madler@alumni.caltech.edu>
