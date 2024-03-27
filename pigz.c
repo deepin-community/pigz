@@ -1,6 +1,6 @@
 /* pigz.c -- parallel implementation of gzip
- * Copyright (C) 2007-2021 Mark Adler
- * Version 2.6  6 Feb 2021  Mark Adler
+ * Copyright (C) 2007-2023 Mark Adler
+ * Version 2.8  19 Aug 2023  Mark Adler
  */
 
 /*
@@ -198,9 +198,19 @@
    2.6     6 Feb 2021  Add --huffman/-H and --rle/U strategy options
                        Fix issue when compiling for no threads
                        Fail silently on a broken pipe
+   2.7    15 Jan 2022  Show time stamp only for the first gzip member
+                       Show totals when listing more than one gzip member
+                       Don't unlink input file if it has other links
+                       Add documentation for environment variables
+                       Fix bug when combining -l with -d
+                       Exit with status of zero if skipping non .gz files
+                       Permit Huffman only (-H) when not compiling with zopfli
+   2.8    19 Aug 2023  Fix version bug when compiling with zlib 1.3
+                       Save a modification time only for regular files
+                       Write all available uncompressed data on an error
  */
 
-#define VERSION "pigz 2.6"
+#define VERSION "pigz 2.8"
 
 /* To-do:
     - make source portable for Windows, VMS, etc. (see gzip source code)
@@ -367,9 +377,11 @@
 #  include <inttypes.h> // intmax_t, uintmax_t
    typedef uintmax_t length_t;
    typedef uint32_t crc_t;
+   typedef uint_least16_t prefix_t;
 #else
    typedef unsigned long length_t;
    typedef unsigned long crc_t;
+   typedef unsigned prefix_t;
 #endif
 
 #ifdef PIGZ_DEBUG
@@ -516,7 +528,7 @@
 
 // Globals (modified by main thread only when it's the only thread).
 local struct {
-    int volatile ret;       // pigz return code
+    int ret;                // pigz return code
     char *prog;             // name by which pigz was invoked
     int ind;                // input file descriptor
     int outd;               // output file descriptor
@@ -549,9 +561,7 @@ local struct {
     int procs;              // maximum number of compression threads (>= 1)
     int setdict;            // true to initialize dictionary in each thread
     size_t block;           // uncompressed input size per thread (>= 32K)
-#ifndef NOTHREAD
     crc_t shift;            // pre-calculated CRC-32 shift for length block
-#endif
 
     // saved gzip/zip header data for decompression, testing, and listing
     time_t stamp;           // time stamp from gzip header
@@ -582,19 +592,31 @@ local struct {
 #endif
 } g;
 
-// Display a complaint with the program name on stderr.
-local int complain(char *fmt, ...) {
-    va_list ap;
-
+local void message(char *fmt, va_list ap) {
     if (g.verbosity > 0) {
         fprintf(stderr, "%s: ", g.prog);
-        va_start(ap, fmt);
         vfprintf(stderr, fmt, ap);
-        va_end(ap);
         putc('\n', stderr);
         fflush(stderr);
     }
+}
+
+// Display a complaint with the program name on stderr.
+local int complain(char *fmt, ...) {
     g.ret = 1;
+    va_list ap;
+    va_start(ap, fmt);
+    message(fmt, ap);
+    va_end(ap);
+    return 0;
+}
+
+// Same as complain(), but don't force a bad return code.
+local int grumble(char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    message(fmt, ap);
+    va_end(ap);
     return 0;
 }
 
@@ -1314,11 +1336,8 @@ local long zlib_vernum(void) {
         }
         ver++;
     } while (left);
-    return left < 2 ? num << (left << 2) : -1;
+    return left < 3 ? num << (left << 2) : -1;
 }
-
-#ifndef NOTHREAD
-// -- threaded portions of pigz --
 
 // -- check value combination routines for parallel calculation --
 
@@ -1399,6 +1418,9 @@ local unsigned long adler32_comb(unsigned long adler1, unsigned long adler2,
     if (sum2 >= BASE) sum2 -= BASE;
     return sum1 | (sum2 << 16);
 }
+
+#ifndef NOTHREAD
+// -- threaded portions of pigz --
 
 // -- pool of spaces for buffer management --
 
@@ -3100,7 +3122,7 @@ local void show_info(int method, unsigned long check, length_t len, int cont) {
         strcpy(tag + max - 3, "...");
 
     // convert time stamp to text
-    if (g.stamp) {
+    if (g.stamp && !cont) {
         strcpy(mod, ctime(&g.stamp));
         now = time(NULL);
         if (strcmp(mod + 20, ctime(&now) + 20) != 0)
@@ -3139,19 +3161,13 @@ local void show_info(int method, unsigned long check, length_t len, int cont) {
             (method == 8 && g.in_tot > (len + (len >> 10) + 12)) ||
             (method == 257 && g.in_tot > len + (len >> 1) + 3))
 #if __STDC_VERSION__-0 >= 199901L || __GNUC__-0 >= 3
-            printf("%10jd %10jd?  unk    %s\n",
-                   (intmax_t)g.in_tot, (intmax_t)len, tag);
+            printf("%10ju %10ju?  unk    %s\n", g.in_tot, len, tag);
         else
-            printf("%10jd %10jd %6.1f%%  %s\n",
-                   (intmax_t)g.in_tot, (intmax_t)len, red, tag);
+            printf("%10ju %10ju %6.1f%%  %s\n", g.in_tot, len, red, tag);
 #else
-            printf(sizeof(off_t) == sizeof(long) ?
-                   "%10ld %10ld?  unk    %s\n" : "%10lld %10lld?  unk    %s\n",
-                   g.in_tot, len, tag);
+            printf("%10lu %10lu?  unk    %s\n", g.in_tot, len, tag);
         else
-            printf(sizeof(off_t) == sizeof(long) ?
-                   "%10ld %10ld %6.1f%%  %s\n" : "%10lld %10lld %6.1f%%  %s\n",
-                   g.in_tot, len, red, tag);
+            printf("%10lu %10lu %6.1f%%  %s\n", g.in_tot, len, red, tag);
 #endif
     }
     if (g.verbosity > 1 && g.hcomm != NULL)
@@ -3401,8 +3417,10 @@ local int outb(void *desc, unsigned char *buf, unsigned len) {
 
         // copy the output and alert the worker bees
         out_len = len;
-        g.out_tot += len;
-        memcpy(out_copy, buf, len);
+        if (len) {
+            g.out_tot += len;
+            memcpy(out_copy, buf, len);
+        }
         twist(outb_write_more, TO, 1);
         twist(outb_check_more, TO, 1);
 
@@ -3444,12 +3462,14 @@ local int outb(void *desc, unsigned char *buf, unsigned len) {
 // and check the gzip, zlib, or zip trailer.
 local void infchk(void) {
     int ret, cont, more;
-    unsigned long check, len;
+    unsigned long check, len, ktot;
     z_stream strm;
     unsigned tmp2;
     unsigned long tmp4;
-    length_t clen;
+    length_t clen, ctot, utot;
 
+    ctot = utot = 0;
+    ktot = CHECK(0L, Z_NULL, 0);
     cont = more = 0;
     do {
         // header already read -- set up for decompression
@@ -3470,6 +3490,9 @@ local void infchk(void) {
         strm.next_in = Z_NULL;
         ret = inflateBack(&strm, inb, NULL, outb, NULL);
         inflateBackEnd(&strm);
+        g.in_left += strm.avail_in;
+        g.in_next = strm.next_in;
+        outb(NULL, NULL, 0);        // finish off final write and check
         if (ret == Z_DATA_ERROR)
             throw(EDOM, "%s: corrupted -- invalid deflate data (%s)",
                   g.inf, strm.msg);
@@ -3477,9 +3500,6 @@ local void infchk(void) {
             throw(EDOM, "%s: corrupted -- incomplete deflate data", g.inf);
         if (ret != Z_STREAM_END)
             throw(EINVAL, "internal error");
-        g.in_left += strm.avail_in;
-        g.in_next = strm.next_in;
-        outb(NULL, NULL, 0);        // finish off final write and check
 
         // compute compressed data length
         clen = g.in_tot - g.in_left;
@@ -3576,14 +3596,30 @@ local void infchk(void) {
 
         // show file information if requested
         if (g.list) {
+            ctot += clen;
+            utot += g.out_tot;
+            ktot = COMB(ktot, check, g.out_tot);
             g.in_tot = clen;
             show_info(8, check, g.out_tot, cont);
-            cont = 1;
+            cont = cont ? 2 : 1;
         }
 
         // if a gzip entry follows a gzip entry, decompress it (don't replace
         // saved header information from first entry)
     } while (g.form == 0 && (ret = get_header(0)) == 8);
+
+    // show totals if more than one gzip member
+    if (cont > 1 && g.verbosity > 0) {
+        if (g.verbosity > 1)
+            printf("        %08lx                ", ktot);
+        printf(
+#if __STDC_VERSION__-0 >= 199901L || __GNUC__-0 >= 3
+               "%10ju %10ju %6.1f%%  (total)\n",
+#else
+               "%10lu %10lu %6.1f%%  (total)\n",
+#endif
+               ctot, utot, 100. * (utot - (double)ctot) / utot);
+    }
 
     // gzip -cdf copies junk after gzip stream directly to output
     if (g.form == 0 && ret == -2 && g.force && g.pipeout && g.decode != 2 &&
@@ -3630,7 +3666,7 @@ local void unlzw(void) {
     // memory for unlzw() -- the first 256 entries of prefix[] and suffix[] are
     // never used, so could have offset the index but it's faster to waste a
     // little memory
-    uint_least16_t prefix[65536];       // index to LZW prefix string
+    prefix_t prefix[65536];             // index to LZW prefix string
     unsigned char suffix[65536];        // one-character LZW suffix
     unsigned char match[65280 + 2];     // buffer for reversed match
 
@@ -3776,7 +3812,7 @@ local void unlzw(void) {
             // link new table entry
             if (end < mask) {
                 end++;
-                prefix[end] = (uint_least16_t)prev;
+                prefix[end] = (prefix_t)prev;
                 suffix[end] = (unsigned char)final;
             }
 
@@ -3889,8 +3925,8 @@ local void process(char *path) {
         vstrcpy(&g.inf, &g.inz, 0, "<stdin>");
         g.ind = 0;
         g.name = NULL;
-        g.mtime = g.headis & 2 ?
-                  (fstat(g.ind, &st) ? time(NULL) : st.st_mtime) : 0;
+        g.mtime = (g.headis & 2) && fstat(g.ind, &st) == 0 &&
+                  S_ISREG(st.st_mode) ? st.st_mtime : 0;
         len = 0;
     }
     else {
@@ -3981,7 +4017,7 @@ local void process(char *path) {
         // don't compress .gz (or provided suffix) files, unless -f
         if (!(g.force || g.list || g.decode) && len >= strlen(g.sufx) &&
                 strcmp(g.inf + len - strlen(g.sufx), g.sufx) == 0) {
-            complain("skipping: %s ends with %s", g.inf, g.sufx);
+            grumble("skipping: %s ends with %s", g.inf, g.sufx);
             return;
         }
 
@@ -4006,6 +4042,13 @@ local void process(char *path) {
         g.mtime = g.headis & 2 ? st.st_mtime : 0;
     }
     SET_BINARY_MODE(g.ind);
+
+    // if requested, just list information about the input file
+    if (g.list && g.decode != 2) {
+        list_info();
+        load_end();
+        return;
+    }
 
     // if decoding or testing, try to read gzip header
     if (g.decode) {
@@ -4046,13 +4089,6 @@ local void process(char *path) {
             load_end();
             return;
         }
-    }
-
-    // if requested, just list information about input file
-    if (g.list) {
-        list_info();
-        load_end();
-        return;
     }
 
     // create output file out, descriptor outd
@@ -4177,8 +4213,12 @@ local void process(char *path) {
         g.outd = -1;            // now prevent deletion on interrupt
         if (g.ind != 0) {
             copymeta(g.inf, g.outf);
-            if (!g.keep)
-                unlink(g.inf);
+            if (!g.keep) {
+                if (st.st_nlink > 1 && !g.force)
+                    complain("%s has hard links -- not unlinking", g.inf);
+                else
+                    unlink(g.inf);
+            }
         }
         if (g.decode && (g.headis & 2) != 0 && g.stamp)
             touch(g.outf, g.stamp);
@@ -4300,11 +4340,11 @@ local void defaults(void) {
     ZopfliInitOptions(&g.zopts);
 #endif
     g.block = 131072UL;             // 128K
+    g.shift = x2nmodp(g.block, 3);
 #ifdef NOTHREAD
     g.procs = 1;
 #else
     g.procs = nprocs(8);
-    g.shift = x2nmodp(g.block, 3);
 #endif
     g.rsync = 0;                    // don't do rsync blocking
     g.setdict = 1;                  // initialize dictionary each thread
@@ -4432,14 +4472,16 @@ local int option(char *arg) {
             case 'C':  get = 7;  break;
 #ifndef NOZOPFLI
             case 'F':  g.zopts.blocksplittinglast = 1;  break;
-            case 'I':  get = 4;  break;
+#endif
             case 'H':  g.strategy = Z_HUFFMAN_ONLY;  break;
+#ifndef NOZOPFLI
+            case 'I':  get = 4;  break;
             case 'J':  get = 5;  break;
 #endif
             case 'K':  g.form = 2;  g.sufx = ".zip";  break;
             case 'L':
                 puts(VERSION);
-                puts("Copyright (C) 2007-2021 Mark Adler");
+                puts("Copyright (C) 2007-2023 Mark Adler");
                 puts("Subject to the terms of the zlib license.");
                 puts("No warranty is provided or implied.");
                 exit(0);
